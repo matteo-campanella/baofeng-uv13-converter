@@ -1,6 +1,7 @@
 import shutil
 import os
 import csv
+import re
 
 def read_data_file(file_path):
     file = open(file_path,'rb')
@@ -75,31 +76,37 @@ def write_name(buffer,channel,name):
     hex_data = string_to_sequence(name)
     buffer[offset:offset+len(hex_data)] = hex_data
 
-def csv_read(file_path):
+def ik2ane_row_filter(row):
+    return False if re.search("^(R|RU)",row['(N)ome']) and \
+        re.search("^[A-Z][A-Z]$",row['(P)rov.']) and \
+        "lombardia" in row['regione'] \
+        else True
+
+def ik2ane_process(row):
+    row['(N)ome']=row['(P)rov.']+row['(N)ome']
+    return row
+
+def chirp_row_filter(row):
+    return False;
+
+def ik2ane_csv_read(file_path):
+    source_rows = []
+    with(open(file_path)) as csvfile:
+        reader = csv.DictReader(csvfile,delimiter=';')
+        for row in reader:
+            source_rows.append(ik2ane_process(row)) if not(ik2ane_row_filter(row)) else None
+    source_rows = sorted(source_rows, key=lambda x: x['(N)ome'])
+    return source_rows
+
+def chirp_csv_read(file_path):
     source_rows = []
     with(open(file_path)) as csvfile:
         reader = csv.DictReader(csvfile,delimiter=',')
         for row in reader:
-            source_rows.append(row)
+            source_rows.append(row) if not(chirp_row_filter(row)) else None
     return source_rows
 
-offsets = {
-    'channel_name': 0x7000,
-    'channel_data': 0x3000,
-    'vfoa_data': 0x3010,
-    'vfob_data': 0x3020
-}
-
-lengths = {
-    'channel_data' : 16,
-    'channel_name': 11
-}
-
-def transfer_channels(s_file,t_file,d_file,start_channel=1):
-    source = csv_read(source_file)
-    print(f'{len(source)} rows read from source file')
-    buffer = read_data_file(template_file)
-    channel = start_channel
+def chirp_csv_extract(source):
     for row in source:
         freq_rx = float(row['Frequency'])*1e6
         if row['Duplex']=='+':
@@ -126,15 +133,62 @@ def transfer_channels(s_file,t_file,d_file,start_channel=1):
             tone_tx = None
 
         isNarrowBw = True if row['Mode'] == 'NFM' else False
-        isLowPwr = True if float(row['Power'][:-1]) < 5 else False
+        isLowPower = True if float(row['Power'][:-1]) < 5 else False
+        yield (name,freq_rx,freq_tx,tone_rx,tone_tx,isNarrowBw,isLowPower)
 
+def chirp_csv_read(file_path):
+    source_rows = []
+    with(open(file_path)) as csvfile:
+        reader = csv.DictReader(csvfile,delimiter=',')
+        for row in reader:
+            source_rows.append(row) if not(chirp_row_filter(row)) else None
+    return source_rows
+
+def ik2ane_csv_extract(source):
+    for row in source:
+        freq_rx = row['(F)req'].replace('.','')
+        freq_rx = float(freq_rx.replace(',','.'))*1e3
+        shift = re.match("([+-]{,1}[0-9]+\.{,1}[0-9]*) (kHz|MHz)",row['shift'])
+        mult = (1e3 if shift.groups()[1]=='kHz' else 1e6) if shift else 0
+        freq_tx = freq_rx + (float(shift.groups()[0]) * mult if shift else 0)
+        name = row['(N)ome']
+        tone = re.match("([0-9]+\.{,1}[0-9]*)",row['tono'])
+        tone_tx = float(tone.group()) if tone else None
+        tone_rx = None
+        isNarrowBw = False
+        isLowPower = False
+        yield (name,freq_rx,freq_tx,tone_rx,tone_tx,isNarrowBw,isLowPower)
+
+offsets = {
+    'channel_name': 0x7000,
+    'channel_data': 0x3000,
+    'vfoa_data': 0x3010,
+    'vfob_data': 0x3020
+}
+
+lengths = {
+    'channel_data' : 16,
+    'channel_name': 11
+}
+
+def transfer_channels(s_file,t_file,d_file,read_function,extract_function,start_channel=1,channels=1000):
+    source = read_function(source_file)
+    print(f'{len(source)} rows read from source file')
+    buffer = read_data_file(template_file)
+    channel = start_channel
+    for (name,freq_rx,freq_tx,tone_rx,tone_tx,isNarrowBw,isLowPower) in extract_function(source):
+        print(f'{channel} {name} {freq_rx} {freq_tx} {tone_rx} {tone_tx} {isNarrowBw} {isLowPower}')
         write_channel(buffer,channel,name,freq_rx,freq_tx,tone_rx,tone_tx,isNarrowBw,False)
         channel=channel+1
+        if channel >= start_channel + channels:
+            break
     write_data_file(buffer,dest_file)
 
 
-source_file = "d:/lpdpmr.csv"
-source_file = 'd:/Baofeng_UV-5R_20231108.csv'
-template_file = "d:/template.data"
+#source_file = "d:/lpdpmr.csv"
+#source_file = 'd:/Baofeng_UV-5R_20231108.csv'
+source_file = 'd:/pontixls.csv'
+template_file = "d:/uv13.data"
 dest_file = "d:/pippo-new.data"
-transfer_channels(source_file,template_file,dest_file)
+#transfer_channels(source_file,template_file,dest_file,chirp_csv_read,chirp_csv_extract,1,3)
+transfer_channels(source_file,template_file,dest_file,ik2ane_csv_read,ik2ane_csv_extract,100,500)
